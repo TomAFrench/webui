@@ -1,176 +1,77 @@
-import { Component } from '@angular/core';
-import { FormGroup, Validators } from '@angular/forms';
+import { ChangeDetectionStrategy, ChangeDetectorRef, Component } from '@angular/core';
+import { Validators } from '@angular/forms';
 import { MatDialog } from '@angular/material/dialog';
-import { Router } from '@angular/router';
+import { FormBuilder } from '@ngneat/reactive-forms';
 import {
   UntilDestroy, untilDestroyed,
 } from '@ngneat/until-destroy';
 import { TranslateService } from '@ngx-translate/core';
-import * as _ from 'lodash';
-import { filter, tap } from 'rxjs/operators';
+import { Observable } from 'rxjs';
+import { map } from 'rxjs/operators';
 import helptext from 'app/helptext/storage/volumes/volume-import-wizard';
-import { WizardConfiguration } from 'app/interfaces/entity-wizard.interface';
-import { Job } from 'app/interfaces/job.interface';
-import { PoolFindResult } from 'app/interfaces/pool-import.interface';
-import { FormSelectConfig } from 'app/modules/entity/entity-form/models/field-config.interface';
-import { Wizard } from 'app/modules/entity/entity-form/models/wizard.interface';
-import { EntityJobComponent } from 'app/modules/entity/entity-job/entity-job.component';
-import { EntityWizardComponent } from 'app/modules/entity/entity-wizard/entity-wizard.component';
-import { EntityUtils } from 'app/modules/entity/utils';
-import { WebSocketService, DialogService, AppLoaderService } from 'app/services';
-import { ModalService } from 'app/services/modal.service';
+import { Option } from 'app/interfaces/option.interface';
+import { FormErrorHandlerService } from 'app/modules/ix-forms/services/form-error-handler.service';
+import { WebSocketService, DialogService } from 'app/services';
+import { IxSlideInService } from 'app/services/ix-slide-in.service';
 
 @UntilDestroy()
 @Component({
-  selector: 'app-volumeimport-wizard',
-  template: '<entity-wizard [conf]="this"></entity-wizard>',
+  templateUrl: './volume-import-wizard.component.html',
+  styleUrls: ['./volume-import-wizard.component.scss'],
+  changeDetection: ChangeDetectionStrategy.OnPush,
 })
-export class VolumeImportWizardComponent implements WizardConfiguration {
-  summary: Record<string, unknown> = {};
-  isLinear = true;
-  summaryTitle = 'Pool Import Summary';
-  saveSubmitText = this.translate.instant('Import');
-  entityWizard: EntityWizardComponent;
-  title: string = helptext.import_title;
-  importablePools: PoolFindResult[] = [];
+export class VolumeImportWizardComponent {
+  readonly helptext = helptext;
+  isFormLoading = false;
 
-  wizardConfig: Wizard[] = [
-    {
-      label: helptext.import_label,
-      fieldConfig: [
-        {
-          type: 'select',
-          name: 'guid',
-          placeholder: helptext.guid_placeholder,
-          tooltip: helptext.guid_tooltip,
-          options: [],
-          validation: [Validators.required],
-          required: true,
-        },
-      ],
-    },
-  ];
+  formGroup = this.fb.group({
+    guid: ['' as string, Validators.required],
+  });
 
-  protected pool: string;
-  hideCancel = true;
+  pool: {
+    readonly fcName: 'guid';
+    label: string;
+    tooltip: string;
+    readonly options: Observable<Option[]>;
+  } = {
+    fcName: 'guid',
+    label: helptext.guid_placeholder,
+    tooltip: helptext.guid_tooltip,
+    options: this.ws.call('pool.import_find').pipe(
+      map((pools) => {
+        return pools.map((pool) => ({
+          label: pool.name + ' | ' + pool.guid,
+          value: pool.guid,
+        }));
+      }),
+    ),
+  };
 
   constructor(
-    private router: Router,
+    private fb: FormBuilder,
+    private cdr: ChangeDetectorRef,
+    private slideInService: IxSlideInService,
+    private errorHandler: FormErrorHandlerService,
     protected ws: WebSocketService,
-    private loader: AppLoaderService,
     protected dialog: MatDialog,
     protected dialogService: DialogService,
-    public modalService: ModalService,
     protected translate: TranslateService,
   ) {
   }
 
-  getImportablePools(): void {
-    const dialogRef = this.dialog.open(
-      EntityJobComponent,
-      { data: { title: helptext.find_pools_title }, disableClose: true },
-    );
-    dialogRef.componentInstance.setDescription(helptext.find_pools_msg);
-    dialogRef.componentInstance.setCall('pool.import_find');
-    dialogRef.componentInstance.submit();
-    dialogRef.componentInstance.success.pipe(
-      untilDestroyed(this),
-    ).subscribe((poolFindResult: Job<PoolFindResult[]>) => {
-      dialogRef.close(false);
-      if (!poolFindResult?.result) {
-        return;
-      }
-      this.importablePools = poolFindResult.result;
-      const guidFc = _.find(this.wizardConfig[0].fieldConfig, { name: 'guid' }) as FormSelectConfig;
-      guidFc.options = poolFindResult.result.map((pool) => {
-        return { label: pool.name + ' | ' + pool.guid, value: pool.guid };
+  onSubmit(): void {
+    this.isFormLoading = true;
+
+    this.ws.call('pool.import_pool', [{ guid: this.formGroup.value.guid }])
+      .pipe(untilDestroyed(this))
+      .subscribe(() => {
+        this.isFormLoading = false;
+        this.cdr.markForCheck();
+        this.slideInService.close();
+      }, (error) => {
+        this.isFormLoading = false;
+        this.cdr.markForCheck();
+        this.errorHandler.handleWsFormError(error, this.formGroup);
       });
-    });
-    dialogRef.componentInstance.failure.pipe(untilDestroyed(this)).subscribe((res) => {
-      new EntityUtils().handleWsError(this.entityWizard, res, this.dialogService);
-      dialogRef.close(false);
-    });
-  }
-
-  preInit(): void {
-    this.getImportablePools();
-  }
-
-  afterInit(entityWizard: EntityWizardComponent): void {
-    this.entityWizard = entityWizard;
-
-    const guidFc = _.find(this.wizardConfig[0].fieldConfig, { name: 'guid' }) as FormSelectConfig;
-    const guidFg = entityWizard.formArray.get([0]).get('guid') as FormGroup;
-    guidFg.valueChanges.pipe(untilDestroyed(this)).subscribe((res) => {
-      const poolToImport = _.find(guidFc.options, { value: res });
-      this.summary[this.translate.instant('Pool to import')] = poolToImport['label'];
-      const selectedPoolIndex = this.importablePools.findIndex((pool) => pool.guid === poolToImport.value);
-      this.pool = this.importablePools[selectedPoolIndex].name;
-    });
-  }
-
-  customSubmit(value: any): void {
-    const dialogRef = this.dialog.open(
-      EntityJobComponent,
-      {
-        data: { title: this.translate.instant('Importing Pool') },
-        disableClose: true,
-      },
-    );
-    dialogRef.componentInstance.setDescription(this.translate.instant('Importing Pool...'));
-    dialogRef.componentInstance.setCall('pool.import_pool', [{ guid: value.guid }]);
-    dialogRef.componentInstance.submit();
-    dialogRef.componentInstance.success.pipe(untilDestroyed(this)).subscribe(() => {
-      dialogRef.close(false);
-
-      this.loader.open();
-      this.ws.call('pool.dataset.query', [[['pool', '=', this.pool]]])
-        .pipe(
-          tap(() => {
-            this.loader.close();
-          }),
-          untilDestroyed(this),
-        ).subscribe((datasets) => {
-          const hasLockedDataset = datasets.some((dataset) => dataset.encrypted && dataset.locked);
-          if (!hasLockedDataset) {
-            this.modalService.closeSlideIn();
-            this.modalService.refreshTable();
-            return;
-          }
-          this.dialogService.confirm({
-            title: helptext.unlock_dataset_dialog_title,
-            message: helptext.unlock_dataset_dialog_message,
-            hideCheckBox: true,
-            buttonMsg: helptext.unlock_dataset_dialog_button,
-          }).pipe(
-            tap(() => {
-              this.modalService.closeSlideIn();
-              this.modalService.refreshTable();
-            }),
-            filter(Boolean),
-            untilDestroyed(this),
-          ).subscribe(() => {
-            this.router.navigate(['/storage', 'id', this.pool, 'dataset', 'unlock', this.pool]);
-          });
-        }, (err) => {
-          this.modalService.closeSlideIn();
-          this.modalService.refreshTable();
-          new EntityUtils().handleWsError(this, err, this.dialogService);
-        });
-    });
-    dialogRef.componentInstance.failure.pipe(untilDestroyed(this)).subscribe((res) => {
-      dialogRef.close(false);
-      this.errorReport(res);
-    });
-  }
-
-  errorReport(res: any): void {
-    if (res.reason && res.trace) {
-      this.dialogService.errorReport(this.translate.instant('Error importing pool'), res.reason, res.trace.formatted);
-    } else if (res.error && res.exception) {
-      this.dialogService.errorReport(this.translate.instant('Error importing pool'), res.error, res.exception);
-    } else {
-      console.error(res);
-    }
   }
 }

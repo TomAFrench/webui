@@ -287,6 +287,7 @@ export class CertificateAddComponent implements WizardConfiguration {
           name: 'common',
           placeholder: helptextSystemCertificates.add.common.placeholder,
           tooltip: helptextSystemCertificates.add.common.tooltip,
+          required: true,
           isHidden: false,
         },
         {
